@@ -1,6 +1,0 @@
-numpy==1.23.4
-pandas==1.5.1
-matplotlib==3.5.2
-torch==1.13.0
-tqdm==4.64.1
-tensorboard==2.12.3

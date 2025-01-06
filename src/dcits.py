@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
+import warnings
 
 class FlattenLinearReshape(nn.Module):
     def __init__(self, N, L):
@@ -17,76 +17,44 @@ class FlattenLinearReshape(nn.Module):
         x = x.flatten(1)
         x = self.lin(x)
         x = x.view(x.shape[0], self.N, self.N, self.L)
-
         return x
     
-    
-    
 class Backbone(nn.Module):
-    """
-    The Backbone network for the DCITS architecture, consisting of several convolutional layers followed by fully connected layers.
-
-    This backbone network can be configured to use different activation functions, and it adapts the convolutional layers
-    based on the input window length (L). The network processes the input through a series of convolutional layers, followed
-    by fully connected layers, and applies the specified activation function to the final output.
-
-    Args:
-        N (int): The number of time series.
-        L (int): The window length.
-        activation (str): The type of activation to apply ('softmax' or 'linear').
-        in_ch (int, optional): Number of input channels for the convolutional layers. Default is 16.
-        temp (float, optional): Temperature parameter for the softmax operation. Default is 1.
-    
-    Methods:
-        forward(x): Passes the input data through the backbone network.
-
-    Returns:
-        torch.Tensor: The processed output after applying convolutional and fully connected layers.
-    """
-    def __init__(self,N,L,activation,in_ch=16,temp=1):
+    def __init__(self, N, L, activation, in_ch=16, temperature=1):
         super().__init__()
         
-        self.N=N
-        self.L=L
-        if temp==None:
-            temp=1
-        self.temp=temp
+        self.N = N
+        self.L = L
+        self.temperature = temperature or 1
         
-        
-        if activation=='softmax':
-            data_ch=1
-            self.activation = nn.Sigmoid() 
-
-
-        elif activation=='linear':            
-            data_ch=N
+        # Set data channels based on activation type
+        if activation == 'sigmoid':
+            data_ch = 1
+            self.activation = FlattenLinearReshape(N, L)  # Changed: Use same as modeler
+            self.final_activation = nn.Sigmoid()  # Add sigmoid after
+        elif activation == 'linear':
+            data_ch = N
             self.activation = FlattenLinearReshape(N, L)
-     
-    
+            self.final_activation = None
+        
         # Define convolutional layers
         kernel_sizes = [(1, L), (N, 1)]
         if L > 1:
             kernel_sizes.append((N, L))
         if L >= 3:
-            kernel_sizes.append((N, 3))
-            kernel_sizes.append((1, 3))
+            kernel_sizes.extend([(N, 3), (1, 3)])
         if L >= 5:
-            kernel_sizes.append((N, 5))
-            kernel_sizes.append((1, 5))
+            kernel_sizes.extend([(N, 5), (1, 5)])
         
         self.convs = nn.ModuleList([nn.Conv2d(data_ch, in_ch, ks) for ks in kernel_sizes])
-
         
-        # Adjust fully connected input dimension based on the included layers
-        fc_input_dim = 0
-        for ks in kernel_sizes:
-            if ks[0] == 1:
-                    fc_input_dim += (L - ks[1] + 1)*N
-            else:
-                    fc_input_dim += (L - ks[1] + 1)
-                    
-        fc_input_dim=fc_input_dim*in_ch
+        # Adjust fully connected input dimension
+        fc_input_dim = sum(
+            in_ch * ((L - ks[1] + 1) * N if ks[0] == 1 else (L - ks[1] + 1))
+            for ks in kernel_sizes
+        )
         
+        # Keep same fc_layers for both
         self.fc_layers = nn.Sequential(
             nn.Linear(fc_input_dim, 128),
             nn.Tanh(),
@@ -98,160 +66,104 @@ class Backbone(nn.Module):
 
     def forward(self, x):
         conv_outs = [conv(x).flatten(1) for conv in self.convs]
-        
         a = torch.cat(conv_outs, dim=1)
-        
         a = self.fc_layers(a)
-        
-        a=torch.reshape(a,(a.shape[0],self.N,self.N,self.L))
-        
-        a=self.activation(a/self.temp)
-                
+        a = a.view(-1, self.N, self.N, self.L)
+        a = self.activation(a / self.temperature)
+        if self.final_activation:
+            a = self.final_activation(a)
         return a
-    
-    
+
 class DCITS(nn.Module):
-    def __init__(self,no_of_timeseries,window_length,in_ch=16,temp=1):
+    def __init__(self, no_of_timeseries, window_length, order=None, temperature=1, in_ch=16):
         """
-        The DCITS (Deep Convolutional Interpreter of Time Series) model combines two backbones: a focuser and a modeler.
-
-        The focuser uses a softmax-based focusing mechanism to highlight important parts of the input time series.
-        The modeler uses a linear transformation to model the relationships in the focused data. The model combines
-        these transformations to produce the final output.
+        DCITS model generalized to handle arbitrary order terms specified by 'order' list.
 
         Args:
-            no_of_timeseries (int): The number of time series in the input data.
-            window_length (int): The length of the time series window.
-            in_ch (int, optional): Number of input channels for the convolutional layers. Default is 16.
-            temp (float, optional): Temperature parameter for the softmax operation. Default is 1.
-    
-        Methods:
-            forward(x): Passes the input data through the DCITS model to produce the output and intermediate coefficients.
-    
-        Returns:
-            torch.Tensor: The processed output.
-            torch.Tensor: The focus weights (f).
-            torch.Tensor: The coefficients from the modeler (c).        
+            no_of_timeseries (int): Number of time series (N).
+            window_length (int): Window length (L).
+            order (list, optional): List indicating which orders to include.
+                                    Example: [1,1,0,1] includes bias (order 0), linear (order 1),
+                                    excludes quadratic (order 2), and includes cubic (order 3).
+            temperature (float, optional): Temperature parameter for the sigmoid operation.
+            in_ch (int, optional): Number of input channels for the convolutional layers.
         """
         super().__init__()
-        
         self.N = no_of_timeseries
         self.L = window_length
-        
-        self.focuser = Backbone(self.N, self.L, 'softmax', in_ch=in_ch, temp=temp)
-        self.modeler = Backbone(self.N, self.L, 'linear', in_ch=in_ch, temp=None)
-        
-    def forward(self, x):
-        """
-        Passes the input data through the DCITS model.
 
-        The input is first processed by the focuser to compute the focus weights (f).
-        The focused input is then passed through the modeler to compute the coefficients (c).
-        The final output is computed by combining the original input, the focus weights, and the coefficients.
-        """
-        f = self.focuser(x)
-        c = self.modeler(f * x)
-        x = x * f * c
-        x = x.sum(dim=(2, 3))
-        
-        return x,f,c
+        if order is None:
+            self.order = [1, 1]
+        else:
+            self.order = order
 
-    
-class DCITSOrder2(nn.Module):
-    """
-    A neural network module that applies a quadratic (second-order) transformation within the DCITS architecture.
+        self.bias = self.order[0] == 1
 
-    This module uses a softmax-based focusing mechanism combined with both linear and quadratic coefficient
-    transformations to modulate the input time series data.
+        self.modelers = nn.ModuleDict()
+        self.focuseres = nn.ModuleDict()
+        for i, include_term in enumerate(self.order):
+            if include_term:
+                if i == 0:
+                    self.bias_focuser = Backbone(self.N, 1, 'sigmoid', in_ch=in_ch, temperature=temperature)
+                    self.bias_modeler = Backbone(self.N, 1, 'linear', in_ch=in_ch, temperature=None)
+                    diagonal_mask = torch.eye(no_of_timeseries)
+                    self.register_buffer('diagonal_mask', diagonal_mask.unsqueeze(-1))
+                else:
+                    self.focuseres[f'a{i}'] = Backbone(self.N, self.L, 'sigmoid', in_ch=in_ch, temperature=temperature)
+                    self.modelers[f'c{i}'] = Backbone(self.N, self.L, 'linear', in_ch=in_ch, temperature=None)
 
-    Args:
-        N (int): The number of time series.
-        L (int): The window length.
-        in_ch (int, optional): Number of input channels for the convolutional layers. Default is 16.
-        temp (float, optional): Temperature parameter for the softmax operation. Default is 1.
+    def forward(self, x, order=None):
+        batch_size = x.size(0)
+        if order is None:
+            inference_order = self.order
+        else:
+            inference_order = order
+            for idx, include_term in enumerate(inference_order):
+                if include_term:
+                    if idx >= len(self.order) or not self.order[idx]:
+                        warnings.warn(f"Order {idx} was not included during training and will be ignored.")
+                        inference_order[idx] = 0
 
-    Methods:
-        forward(x): Applies the quadratic transformation on the input tensor x.
+        x_total = 0
+        f_list = []
+        c_list = []
 
-    Returns:
-        torch.Tensor: The processed output.
-        torch.Tensor: The focus weights (f).
-        torch.Tensor: The linear coefficients (c1).
-        torch.Tensor: The quadratic coefficients (c2).
-    """
-    def __init__(self,no_of_timeseries,window_length,in_ch=16,temp=1):
-        super().__init__()
-        
-        self.N = no_of_timeseries
-        self.L = window_length
-        
-        self.focuser = Backbone(self.N, self.L, 'softmax', in_ch=in_ch, temp=temp)
-        self.linear_modeler=Backbone(self.N, self.L, 'linear', in_ch=in_ch, temp=None)
-        self.quadratic_modeler=Backbone(self.N, self.L, 'linear', in_ch=in_ch, temp=None)
+        if self.bias and inference_order[0]:
+            ones = torch.ones((batch_size, 1, self.N, 1), device=x.device)
+            f_bias = self.bias_focuser(ones)
+            c_bias = self.bias_modeler(f_bias)
+            f_bias = f_bias * self.diagonal_mask
+            c_bias = c_bias * self.diagonal_mask
+            x_bias = ones * f_bias * c_bias
+            x_bias_sum = x_bias.sum(dim=(2, 3))
+            x_total += x_bias_sum
+            f_list.append(f_bias)
+            c_list.append(c_bias)
+        else:
+            f_list.append(None)
+            c_list.append(None)
 
-        
-    def forward(self, x):
-        """
-        Applies the quadratic transformation on the input tensor x.
+        x_expanded = x.repeat(1, self.N, 1, 1)
+        x_power_expanded = x_expanded
+        x_power = x
 
-        Args:
-            x (torch.Tensor): The input tensor of shape (batch_size, num_channels, N, L).
+        for i in range(1, len(self.order)):
+            if i < len(inference_order) and inference_order[i]:
+                if self.order[i]:
+                    f_i = self.focuseres[f'a{i}'](x_power)
+                    c_i = self.modelers[f'c{i}'](f_i * x_power_expanded)
+                    x_term = x_power_expanded * f_i * c_i
+                    x_term_sum = x_term.sum(dim=(2, 3))
+                    x_total += x_term_sum
+                    f_list.append(f_i)
+                    c_list.append(c_i)
+                else:
+                    f_list.append(None)
+                    c_list.append(None)
+            else:
+                f_list.append(None)
+                c_list.append(None)
+            x_power_expanded = x_power_expanded * x_expanded
+            x_power = x_power * x
 
-        Returns:
-            torch.Tensor: The processed output of shape (batch_size,).
-            torch.Tensor: The focus weights (f).
-            torch.Tensor: The linear coefficients (c1).
-            torch.Tensor: The quadratic coefficients (c2).
-        """
-        f=self.focuser(x)
-        c1=self.linear_modeler(f*x)
-        c2=self.quadratic_modeler(f*x*x)
-        x=x*f*c1 + x*x*f*c2
-        x=x.sum(dim=(2,3))
-        
-        return x,f,(c1,c2)
-    
-class DCITSOrder3(nn.Module):
-    """
-    A neural network module that applies a cubic (third-order) transformation within the DCITS architecture.
-
-    This module uses a softmax-based focusing mechanism combined with linear, quadratic, and cubic coefficient
-    transformations to modulate the input time series data.
-
-    Args:
-        N (int): The number of time series.
-        L (int): The window length.
-        in_ch (int, optional): Number of input channels for the convolutional layers. Default is 16.
-        temp (float, optional): Temperature parameter for the softmax operation. Default is 1.
-
-    Methods:
-        forward(x): Passes the input data through the third-order transformation process.
-
-    Returns:
-        torch.Tensor: The processed output.
-        torch.Tensor: The focus weights (f).
-        torch.Tensor: The linear coefficients (c1).
-        torch.Tensor: The quadratic coefficients (c2).
-        torch.Tensor: The cubic coefficients (c3).
-    """
-    def __init__(self,no_of_timeseries,window_length,in_ch=16,temp=1):
-        super().__init__()
-        
-        self.N = no_of_timeseries
-        self.L = window_length
-        
-        self.focuser = Backbone(self.N, self.L, 'softmax', in_ch=in_ch, temp=temp)
-        self.linear_modeler=Backbone(self.N, self.L, 'linear', in_ch=in_ch, temp=None)
-        self.quadratic_modeler=Backbone(self.N, self.L, 'linear', in_ch=in_ch, temp=None)
-        self.cubic_modeler=Backbone(self.N, self.L, 'linear', in_ch=in_ch, temp=None)
-
-        
-    def forward(self, x):
-        f=self.focuser(x)
-        c1=self.linear_modeler(f*x)
-        c2=self.quadratic_modeler(f*x*x)
-        c3=self.cubic_modeler(f*x*x*x)
-        x=x*f*c1 + x*x*f*c2 + x*x*x*f*c3
-        x=x.sum(dim=(2,3))
-        
-        return x,f,(c1,c2,c3)
+        return x_total, f_list, c_list
