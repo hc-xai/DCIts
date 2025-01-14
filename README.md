@@ -44,6 +44,12 @@ conda install ipykernel
 python -m ipykernel install --user --name=DCIts --display-name "Python (DCIts)"
 ```
 
+We also provide requirements.txt file for pip installation:
+
+```bash
+pip install -r requirements.txt
+```
+
 ## Key Components
 
 ### DCITS Model (`dcits.py`)
@@ -166,13 +172,12 @@ This project is licensed under the **MIT License** - see the LICENSE file for de
 If you use **DCIts** in your research, please consider citing our paper:
 
 ```bibtex
-@article{placeholder,
+@article{dcits2024,
   title={DCIts - Deep Convolutional Interpreter for Time Series},
   author={Domjan Barić, Davor Horvatić},
-  journal={Journal Name placeholder},
+  journal={arXiv preprint arXiv:2501.04339},
   year={2024},
-  volume={X},
-  pages={Y-Z},
+  note={\url{https://arxiv.org/abs/2501.04339}}
 }
 ```
 
