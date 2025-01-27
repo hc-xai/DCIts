@@ -31,7 +31,7 @@ Ensure that you have **PyTorch** installed, as it is a core dependency for this 
 ```bash
 conda create --name DCIts python=3.9 -y
 conda activate DCIts
-onda install pytorch torchvision torchaudio pytorch-cuda=12.4 -c pytorch -c nvidia
+conda install pytorch torchvision torchaudio pytorch-cuda=12.4 -c pytorch -c nvidia
 conda install matplotlib
 conda install pandas -c conda-forge
 conda install tensorboard -c conda-forge
